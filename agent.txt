@@ -1,0 +1,93 @@
+from models import CoreElements, ValidationResult, AcceptanceCriteria, MissingTechnicalDetail, FinalStory
+from llm_client import StructuredLLMClient
+
+class JiraGroomingAgent:
+    def __init__(self, llm_client: StructuredLLMClient):
+        self.llm = llm_client
+        self.state = CoreElements(who=None, what=None, why=None)
+        self.ac = []
+
+    def run(self):
+        print("--- AI Jira Grooming Assistant ---")
+        raw_input = input("1. Please provide the raw Jira description:\n> ")
+        
+        self._extract_core_elements(raw_input)
+        self._clarify_missing_context()
+        self._generate_and_review_ac()
+        self._refine_technical_details()
+        self._generate_final_story()
+
+    def _extract_core_elements(self, raw_input: str):
+        prompt = f"Extract WHO, WHAT, and WHY from this request. If missing, return null.\nRequest: {raw_input}"
+        self.state = self.llm.query(
+            "You are a strict requirements analyst.", 
+            prompt, 
+            CoreElements
+        )
+
+    def _clarify_missing_context(self):
+        for field in ['who', 'why']:
+            while getattr(self.state, field) is None:
+                user_ans = input(f"\nMissing {field.upper()}. Please clarify:\n> ")
+                
+                validation = self.llm.query(
+                    "You validate requirements. Determine if the user's answer is valid and normalize it.",
+                    f"Context: We need the {field.upper()}.\nUser answered: {user_ans}",
+                    ValidationResult
+                )
+                
+                if validation.is_valid:
+                    setattr(self.state, field, validation.normalized_value)
+                else:
+                    print("That answer was too vague. Let's try again.")
+
+    def _generate_and_review_ac(self):
+        print("\nGenerating Acceptance Criteria...")
+        ac_draft = self.llm.query(
+            "Generate testable Agile Acceptance Criteria based on the context.",
+            f"Context: {self.state.model_dump_json()}",
+            AcceptanceCriteria
+        )
+        
+        print("\nProposed Acceptance Criteria:")
+        for idx, crit in enumerate(ac_draft.criteria, 1):
+            print(f"{idx}. {crit}")
+            
+        feedback = input("\nDo you confirm these AC, or would you like to modify them? (Type 'confirm' or provide edits):\n> ")
+        if feedback.strip().lower() != 'confirm':
+            final_ac = self.llm.query(
+                "Update the Acceptance Criteria based on user feedback.",
+                f"Original AC: {ac_draft.model_dump_json()}\nUser Feedback: {feedback}",
+                AcceptanceCriteria
+            )
+            self.ac = final_ac.criteria
+        else:
+            self.ac = ac_draft.criteria
+
+    def _refine_technical_details(self):
+        analysis = self.llm.query(
+            "Analyze the WHAT statement for missing technical implementation details. Identify the single most critical missing detail.",
+            f"WHAT statement: {self.state.what}",
+            MissingTechnicalDetail
+        )
+        
+        if analysis.has_missing_detail and analysis.question:
+            ans = input(f"\nOne technical detail may be missing:\n{analysis.question}\n(Answer, or type 'not important'):\n> ")
+            if ans.strip().lower() != "not important":
+                self.state.what += f" [Technical context: {ans}]"
+
+    def _generate_final_story(self):
+        print("\nGenerating final Jira artifact...")
+        final = self.llm.query(
+            "Generate a final Agile Jira story and acceptance criteria.",
+            f"Context: {self.state.model_dump_json()}\nAgreed AC: {self.ac}",
+            FinalStory
+        )
+        
+        print("\n" + "="*40)
+        print("FINAL JIRA STORY")
+        print("="*40)
+        print(final.user_story)
+        print("\nAcceptance Criteria:")
+        for idx, crit in enumerate(final.acceptance_criteria, 1):
+            print(f"{idx}. {crit}")
