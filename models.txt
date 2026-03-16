@@ -14,8 +14,8 @@ class AcceptanceCriteria(BaseModel):
     criteria: List[str] = Field(description="List of testable, implementation-independent acceptance criteria.")
 
 class MissingTechnicalDetail(BaseModel):
-    has_missing_detail: bool = Field(description="True if a critical technical detail is missing.")
-    question: Optional[str] = Field(description="The single most important question to ask the user to clarify the WHAT.")
+    has_missing_details: bool = Field(description="True if critical technical details are missing.")
+    questions: List[str] = Field(description="A list of UP TO 3 critical questions to clarify the WHAT. Empty if nothing crucial is missing.")
 
 class FinalStory(BaseModel):
     user_story: str = Field(description="The Agile user story sentence (As a... I want to... So that...).")
