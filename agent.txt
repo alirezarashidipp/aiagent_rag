@@ -35,10 +35,25 @@ class JiraGroomingAgent:
 
     def _clarify_missing_context(self):
         sys_prompt = self.prompts['system_personas']['validator']
+        max_retries = 3  # Production circuit breaker
         
         for field in ['who', 'why']:
+            retries = 0
+            last_user_ans = None
+            
             while getattr(self.state, field) is None:
-                user_ans = input(f"\nMissing {field.upper()}. Please clarify:\n> ")
+                if retries >= max_retries:
+                    print(f"\n[SYSTEM WARN] Validation threshold exceeded. Forcing ingestion of raw input.")
+                    # Fallback to the last provided answer or a safe default
+                    setattr(self.state, field, last_user_ans or f"Unknown {field}")
+                    break
+                    
+                user_ans = input(f"\nMissing {field.upper()}. Please clarify:\n> ").strip()
+                if not user_ans:
+                    print("Input cannot be empty. Try again.")
+                    continue
+                    
+                last_user_ans = user_ans
                 
                 user_prompt = self.prompts['user_prompts']['validate_missing'].format(
                     field_name=field.upper(),
@@ -50,7 +65,8 @@ class JiraGroomingAgent:
                 if validation.is_valid:
                     setattr(self.state, field, validation.normalized_value)
                 else:
-                    print("That answer was too vague. Let's try again.")
+                    retries += 1
+                    print(f"The LLM rejected the input for lacking detail. (Attempt {retries}/{max_retries})")
 
     def _generate_and_review_ac(self):
         print("\nGenerating Acceptance Criteria...")
