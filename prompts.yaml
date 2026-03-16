@@ -9,10 +9,19 @@ user_prompts:
   extract_core: |
     Extract WHO, WHAT, and WHY from this request. If missing, return null.
     Request: {raw_input}
+
   
-  validate_missing: |
-    Context: We need the {field_name}.
+validate_missing: |
+    Context: We need the {field_name} for a Jira story.
     User answered: {user_ans}
+    
+    CRITICAL INSTRUCTION: 
+    Evaluate if the user's answer reasonably provides the missing context. 
+    - For 'WHO': Job titles (e.g., 'Data Engineer', 'Developer'), team names, or specific people are ALL perfectly valid.
+    - For 'WHY': Any business reason, even if brief, is valid.
+    Set `is_valid` to true if the intent is clear, and normalize the text to a professional Agile format (e.g. "Data Engineer").
+
+
     
   generate_ac: |
     Generate testable Agile Acceptance Criteria based on the context.
