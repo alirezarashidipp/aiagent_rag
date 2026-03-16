@@ -1,0 +1,14 @@
+from llm_client import StructuredLLMClient
+from agent import JiraGroomingAgent
+
+def main():
+    # Model name, User ID, and Base URL are injected here if they differ from the defaults.
+    try:
+        client = StructuredLLMClient() 
+        agent = JiraGroomingAgent(client)
+        agent.run()
+    except Exception as e:
+        print(f"\n[SYSTEM HALT] Execution failed: {e}")
+
+if __name__ == "__main__":
+    main()
