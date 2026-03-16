@@ -24,9 +24,24 @@ user_prompts:
     - Set `normalized_value` to a clean, professional format.
     - ONLY set `is_valid` to false if the input is complete gibberish or completely unrelated to the question.
 
+
+
+
+
+
   generate_ac: |
-    Generate testable Agile Acceptance Criteria based on the context.
-    Context: {state_json}
+      Generate testable, implementation-independent Agile Acceptance Criteria based on the context.
+      Context: {state_json}
+      
+      CRITICAL CONSTRAINT: 
+      Generate a MAXIMUM of 4 acceptance criteria. Prioritize the most critical functional requirements and data integrity constraints. Do not include redundant or trivial UI tests.
+
+
+
+  
+
+    
+    
     
   update_ac: |
     Update the Acceptance Criteria based on user feedback.
