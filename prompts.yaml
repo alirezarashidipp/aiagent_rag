@@ -48,9 +48,13 @@ user_prompts:
     Original AC: {ac_json}
     User Feedback: {feedback}
     
+
   refine_tech: |
-    Analyze the WHAT statement for missing technical implementation details. Identify the single most critical missing detail.
+    Analyze the WHAT statement for missing technical implementation details. 
+    Identify UP TO 3 of the most critical missing details (e.g., data types, nullability, upstream sources). 
+    CRITICAL INSTRUCTION: Do not generate trivial or obvious questions. If the statement is already technically complete, return an empty list.
     WHAT statement: {what_statement}
+
     
   generate_story: |
     Generate a final Agile Jira story and acceptance criteria.
