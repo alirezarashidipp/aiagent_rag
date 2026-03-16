@@ -83,10 +83,15 @@ class JiraGroomingAgent:
         
         analysis = self.llm.query(sys_prompt, user_prompt, MissingTechnicalDetail)
         
-        if analysis.has_missing_detail and analysis.question:
-            ans = input(f"\nOne technical detail may be missing:\n{analysis.question}\n(Answer, or type 'not important'):\n> ")
-            if ans.strip().lower() != "not important":
-                self.state.what += f" [Technical context: {ans}]"
+        if analysis.has_missing_details and analysis.questions:
+            print(f"\n[SYSTEM] The technical lead identified {len(analysis.questions)} potential missing detail(s).")
+            
+            for i, question in enumerate(analysis.questions, 1):
+                ans = input(f"\nDetail {i}/{len(analysis.questions)}:\n{question}\n(Answer, or type 'skip' / 'not important'):\n> ").strip()
+                
+                # Check against common dismissal phrases
+                if ans.lower() not in ["not important", "skip", "no", "n/a", ""]:
+                    self.state.what += f" [Technical Context: {ans}]"
 
     def _generate_and_review_ac(self):
         print("\nGenerating Acceptance Criteria...")
