@@ -1,14 +1,23 @@
 from llm_client import StructuredLLMClient
-from agent import JiraGroomingAgent
-
-def main():
-    # Model name, User ID, and Base URL are injected here if they differ from the defaults.
-    try:
-        client = StructuredLLMClient() 
-        agent = JiraGroomingAgent(client)
-        agent.run()
-    except Exception as e:
-        print(f"\n[SYSTEM HALT] Execution failed: {e}")
+from agent import JiraStatelessPipeline
 
 if __name__ == "__main__":
-    main()
+    print("[SYSTEM BOOT] Initializing Enterprise Raw-Text Pipeline...")
+    try:
+        # ورودی خام که فقط WHAT در آن تا حدودی مشخص است. 
+        # مدل استخراج (فاز 0) باید WHO و WHY را False برگرداند.
+        raw_input = "we need to add a new column in the Project database table to store project status."
+        
+        client = StructuredLLMClient() 
+        pipeline = JiraStatelessPipeline(client)
+        
+        final_state = pipeline.run(raw_input)
+        
+        print("\n" + "="*50)
+        print("[SYSTEM TERMINATE] Pipeline Execution Completed Successfully.")
+        print("Final Exportable Session State (JSON):")
+        print(final_state.model_dump_json(indent=2))
+        print("="*50)
+        
+    except Exception as e:
+        print(f"\n[FATAL ERROR] Execution halted abruptly: {e}")
