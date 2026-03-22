@@ -2,8 +2,8 @@ system_personas:
   extractor: "You are a precise data extraction pipeline. Analyze raw user text and extract Agile Jira requirements strictly. If a field is missing or vague, aggressively set 'identified' to false."
   validator: "You are a strict Agile requirement validator. Evaluate if user input is valid. If invalid, provide a precise, 1-sentence rejection reason."
   tech_lead: "You are a Senior Technical Lead. Analyze feature requests to identify missing technical implementation details."
-  agile_coach: "You are an expert Agile coach. Generate or refine testable Agile Acceptance Criteria."
-  story_writer: "You are an Agile Product Owner. Synthesize context into a strict Agile Jira user story."
+  tech_evaluator: "You are a strict technical screener. Evaluate if a user's answer contains valid technical context or if it is an evasion (e.g., 'I dont know', 'skip', gibberish)."
+  agile_coach: "You are an expert Agile Product Owner. Your job is to synthesize raw requirements, technical constraints, and user feedback into a complete Agile artifact containing a strict User Story and testable Acceptance Criteria."
 
 user_prompts:
   extract_raw_text: |
@@ -30,28 +30,33 @@ user_prompts:
     
     WHAT statement: {what_statement}
 
-  generate_ac: |
-    Generate testable Agile Acceptance Criteria.
+  evaluate_tech_answer: |
+    Evaluate the user's answer: "{user_answer}"
+    To the technical question: "{question}"
     
-    Feature Context: WHO: {who} | WHAT: {what} | WHY: {why}
+    Set is_valid to true ONLY if it provides meaningful technical context. 
+    If they skip, evade, or say they don't know, set is_valid to false and state the reason.
+
+  generate_agile_artifact: |
+    Generate a complete Agile artifact.
+    
+    Context:
+    WHO: {who}
+    WHAT: {what}
+    WHY: {why}
     Tech Notes: {tech_notes}
     Extracted AC Evidence: {ac_evidence}
     
-    If Extracted AC Evidence exists, rewrite and merge it with Tech Notes.
-    If null, generate up to 4 net-new criteria based purely on Context and Tech Notes.
+    RULES:
+    1. Create a strict User Story: "As a [WHO], I want to [WHAT], so that [WHY]".
+    2. Create testable Acceptance Criteria.
+    3. If Extracted AC Evidence exists, merge it with Tech Notes. If null, generate purely based on Context and Tech Notes.
 
-  update_ac: |
-    Original AC: {ac_json}
-    User Feedback: "{feedback}"
-    Strictly apply feedback to update the AC list.
-
-  generate_story: |
-    Context: WHO: {who} | WHAT: {what} | WHY: {why}
-    Final AC: {agreed_ac}
+  update_agile_artifact: |
+    Update the Agile artifact based on user feedback.
     
-    Format: As a [WHO], I want to [WHAT], So that [WHY]. Then list the AC.
-
-  update_story: |
-    Original Story: {story_json}
+    Current Story: {current_story}
+    Current AC: {current_ac}
     User Feedback: "{feedback}"
-    Apply feedback and return updated Story and AC.
+    
+    Strictly apply the feedback to rewrite and return both the User Story and Acceptance Criteria as a cohesive unit.
