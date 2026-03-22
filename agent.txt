@@ -1,137 +1,257 @@
 import yaml
 import asyncio
-from typing import Tuple
+from typing import TypedDict, Literal, List, Optional
+from pydantic import BaseModel, Field
+from langgraph.graph import StateGraph, START, END
+from llm_client import StructuredLLMClient
 from models import (
     SessionState, RawTextExtraction, ValidationResult, 
     MissingTechnicalDetail, AcceptanceCriteria, FinalStory
 )
-from llm_client import StructuredLLMClient
+
+class TechAnswerValidation(BaseModel):
+    is_valid: bool = Field(description="True if the user provided actual technical context. False if they said 'I dont know', 'skip', or gibberish.")
+    reason: str = Field(description="Reason for rejection or acceptance.")
+
+class GraphState(TypedDict):
+    user_input: str
+    
+    # Core Data
+    who: Optional[str]
+    what: Optional[str]
+    why: Optional[str]
+    ac_evidence: Optional[str]
+    pending_questions: List[str]
+    tech_notes: List[str]
+    ac_list: List[str]
+    final_story: Optional[str]
+    
+    # Execution Constraints
+    phase1_retries: int
+    phase3_retries: int
+    phase4_retries: int
+    
+    # Flow Control
+    sys_message: str
+    is_complete: bool
 
 class JiraStatelessPipeline:
     def __init__(self, llm_client: StructuredLLMClient):
         self.llm = llm_client
-        
-        # In enterprise apps, inject this dependency instead of reading files in __init__
         with open("prompts.yaml", "r") as f:
             self.prompts = yaml.safe_load(f)
             
         self.personas = self.prompts["system_personas"]
         self.templates = self.prompts["user_prompts"]
+        
+        self.graph = self._build_graph()
 
     def run(self, raw_input: str) -> SessionState:
         """
-        Synchronous wrapper. Bootstraps the asyncio event loop for CLI execution.
+        CLI Entrypoint. Bootstraps the Asyncio loop.
         """
         return asyncio.run(self._orchestrate_cli_loop(raw_input))
 
     async def _orchestrate_cli_loop(self, initial_input: str) -> SessionState:
-        """
-        Manages the interactive terminal loop and state persistence across turns.
-        """
-        state = SessionState()
-        user_input = initial_input
+        state: GraphState = {
+            "user_input": initial_input,
+            "who": None, "what": None, "why": None, "ac_evidence": None,
+            "pending_questions": [], "tech_notes": [], "ac_list": [], "final_story": None,
+            "phase1_retries": 0, "phase3_retries": 0, "phase4_retries": 0,
+            "sys_message": "", "is_complete": False
+        }
 
-        while True:
-            reply, state = await self._execute_turn(user_input, state)
-            print(f"\n[AGENT] {reply}")
+        while not state["is_complete"]:
+            state = await self.graph.ainvoke(state)
             
-            # Termination condition
-            if getattr(state, "story_confirmed", False):
+            if state["is_complete"]:
+                print(f"\n[AGENT] {state['sys_message']}")
                 break
                 
-            # Await terminal I/O (Blocking)
-            user_input = input("\n[USER] > ").strip()
-            if not user_input:
-                user_input = "[INIT]"
+            print(f"\n[AGENT] {state['sys_message']}")
+            user_val = input("\n[USER] > ").strip()
+            state["user_input"] = user_val if user_val else "[INIT]"
 
+        final_session = SessionState(
+            what=state["what"], why=state["why"], who=state["who"],
+            ac_evidence=state["ac_evidence"], tech_notes=state["tech_notes"],
+            ac_list=state["ac_list"], final_story=state["final_story"]
+        )
+        return final_session
+
+    def _build_graph(self):
+        workflow = StateGraph(GraphState)
+
+        workflow.add_node("phase0_extractor", self._node_extractor)
+        workflow.add_node("phase1_validator", self._node_validator)
+        workflow.add_node("phase2_tech", self._node_tech_grooming)
+        workflow.add_node("phase3_ac", self._node_ac_synthesis)
+        workflow.add_node("phase4_story", self._node_story_synthesis)
+
+        workflow.add_conditional_edges(START, self._route_from_start)
+        workflow.add_conditional_edges("phase0_extractor", self._route_general)
+        workflow.add_conditional_edges("phase1_validator", self._route_general)
+        workflow.add_conditional_edges("phase2_tech", self._route_general)
+        workflow.add_conditional_edges("phase3_ac", self._route_general)
+        workflow.add_conditional_edges("phase4_story", self._route_general)
+
+        return workflow.compile()
+
+    # ==========================================
+    # ROUTING LOGIC
+    # ==========================================
+    def _route_from_start(self, state: GraphState) -> str:
+        if not state["what"] and not state["who"] and not state["why"]:
+            return "phase0_extractor"
+        return self._route_general(state)
+
+    def _route_general(self, state: GraphState) -> str:
+        if state["is_complete"]:
+            return END
+            
+        if not state["what"] or not state["who"] or not state["why"]:
+            return "phase1_validator"
+            
+        if getattr(state, "_needs_tech_init", True) or state["pending_questions"]:
+            return "phase2_tech"
+            
+        if not getattr(state, "_ac_confirmed", False):
+            return "phase3_ac"
+            
+        if not getattr(state, "_story_confirmed", False):
+            return "phase4_story"
+            
+        return END
+
+    # ==========================================
+    # GRAPH NODES
+    # ==========================================
+    async def _node_extractor(self, state: GraphState) -> GraphState:
+        prompt = self.templates["extract_raw_text"].format(raw_text=state["user_input"])
+        ext: RawTextExtraction = await self.llm.query(self.personas["extractor"], prompt, RawTextExtraction)
+        
+        state["what"] = ext.what.evidence if ext.what.identified else None
+        state["who"] = ext.who.evidence if ext.who.identified else None
+        state["why"] = ext.why.evidence if ext.why.identified else None
+        state["ac_evidence"] = ext.ac_evidence
+        state["user_input"] = "[INIT]"
         return state
 
-    async def _execute_turn(self, user_input: str, state: SessionState) -> Tuple[str, SessionState]:
-        """
-        Pure state machine transition logic. No UI blocking here.
-        """
-        # Phase 0: Extraction
-        if not state.what and not state.who and not state.why:
-            prompt = self.templates["extract_raw_text"].format(raw_text=user_input)
-            ext: RawTextExtraction = await self.llm.query(self.personas["extractor"], prompt, RawTextExtraction)
-            
-            state.what = ext.what.evidence if ext.what.identified else None
-            state.who = ext.who.evidence if ext.who.identified else None
-            state.why = ext.why.evidence if ext.why.identified else None
-            state.ac_evidence = ext.ac_evidence
-            
-            return await self._execute_turn("[INIT]", state)
+    async def _node_validator(self, state: GraphState) -> GraphState:
+        missing = [f for f in ["what", "why", "who"] if not state[f]]
+        if not missing:
+            return state
 
-        # Phase 1: Validation
-        missing = [f for f in ["what", "why", "who"] if getattr(state, f) is None]
-        if missing:
-            field = missing[0]
-            if user_input == "[INIT]":
-                return f"Missing field '{field.upper()}'. Please define it.", state
-                
-            prompt = self.templates["validate_missing"].format(field_name=field, user_ans=user_input)
-            val: ValidationResult = await self.llm.query(self.personas["validator"], prompt, ValidationResult)
-            
-            if val.is_valid:
-                setattr(state, field, val.normalized_value)
-                return await self._execute_turn("[INIT]", state)
-            return f"Rejected: {val.rejection_reason}. Try again.", state
+        field = missing[0]
+        
+        if state["phase1_retries"] >= 3:
+            state["sys_message"] = f"ABORT: Failed to resolve '{field}' after 3 attempts."
+            state["is_complete"] = True
+            return state
 
-        # Phase 2: Technical Grooming
-        if getattr(state, "pending_questions", None) is None:
-            prompt = self.templates["generate_dynamic_questions"].format(what_statement=state.what)
+        if state["user_input"] == "[INIT]":
+            state["sys_message"] = f"Missing field '{field.upper()}'. Please provide details."
+            return state
+
+        prompt = self.templates["validate_missing"].format(field_name=field, user_ans=state["user_input"])
+        val: ValidationResult = await self.llm.query(self.personas["validator"], prompt, ValidationResult)
+        
+        if val.is_valid:
+            state[field] = val.normalized_value
+            state["phase1_retries"] = 0
+            state["user_input"] = "[INIT]"
+        else:
+            state["phase1_retries"] += 1
+            state["sys_message"] = f"Rejected ({state['phase1_retries']}/3): {val.rejection_reason}. Try again."
+            
+        return state
+
+    async def _node_tech_grooming(self, state: GraphState) -> GraphState:
+        if getattr(state, "_needs_tech_init", True):
+            prompt = self.templates["generate_dynamic_questions"].format(what_statement=state["what"])
             tech: MissingTechnicalDetail = await self.llm.query(self.personas["tech_lead"], prompt, MissingTechnicalDetail)
-            state.pending_questions = tech.questions
-            return await self._execute_turn("[INIT]", state)
+            state["pending_questions"] = tech.questions
+            state["_needs_tech_init"] = False
+            state["user_input"] = "[INIT]"
+            
+            if not state["pending_questions"]:
+                return state
 
-        if state.pending_questions:
-            if user_input != "[INIT]":
-                if user_input.strip().lower() != "skip":
-                    state.tech_notes.append(f"Q: {state.pending_questions[0]} | A: {user_input}")
-                state.pending_questions.pop(0)
-                
-            if state.pending_questions:
-                return f"Tech Question: {state.pending_questions[0]}", state
-            return await self._execute_turn("[INIT]", state)
+        if state["user_input"] != "[INIT]" and state["pending_questions"]:
+            eval_prompt = f"Evaluate user answer: '{state['user_input']}' to question: '{state['pending_questions'][0]}'"
+            eval_res: TechAnswerValidation = await self.llm.query(
+                "You evaluate if a user answer contains valid technical info or just ignorance/skipping.", 
+                eval_prompt, 
+                TechAnswerValidation
+            )
+            
+            if eval_res.is_valid:
+                state["tech_notes"].append(f"Q: {state['pending_questions'][0]} | A: {state['user_input']}")
+            
+            state["pending_questions"].pop(0)
 
-        # Phase 3: Acceptance Criteria Synthesis
-        if not state.ac_list:
+        if state["pending_questions"]:
+            state["sys_message"] = f"Tech Question: {state['pending_questions'][0]}"
+        else:
+            state["user_input"] = "[INIT]"
+            
+        return state
+
+    async def _node_ac_synthesis(self, state: GraphState) -> GraphState:
+        if state["phase3_retries"] >= 3:
+            state["_ac_confirmed"] = True
+            state["sys_message"] = "AC limit reached. Proceeding with current draft."
+            state["user_input"] = "[INIT]"
+            return state
+
+        if not state["ac_list"]:
             prompt = self.templates["generate_ac"].format(
-                who=state.who, what=state.what, why=state.why,
-                tech_notes="\n".join(state.tech_notes), ac_evidence=state.ac_evidence or "None"
+                who=state["who"], what=state["what"], why=state["why"],
+                tech_notes="\n".join(state["tech_notes"]), ac_evidence=state["ac_evidence"] or "None"
             )
             ac: AcceptanceCriteria = await self.llm.query(self.personas["agile_coach"], prompt, AcceptanceCriteria)
-            state.ac_list = ac.criteria
-            return "Draft AC generated. Type 'confirm' to proceed or write feedback:\n" + "\n".join(state.ac_list), state
+            state["ac_list"] = ac.criteria
+            state["sys_message"] = "Draft AC generated. Type 'confirm' to proceed or write feedback:\n" + "\n".join(state["ac_list"])
+            return state
 
-        if not getattr(state, "ac_confirmed", False):
-            if user_input.strip().lower() == "confirm":
-                state.ac_confirmed = True
-                return await self._execute_turn("[INIT]", state)
-                
-            prompt = self.templates["update_ac"].format(ac_json=state.ac_list, feedback=user_input)
-            ac_updated: AcceptanceCriteria = await self.llm.query(self.personas["agile_coach"], prompt, AcceptanceCriteria)
-            state.ac_list = ac_updated.criteria
-            return "AC Updated. Type 'confirm' to proceed or write feedback:\n" + "\n".join(state.ac_list), state
+        if state["user_input"].strip().lower() == "confirm":
+            state["_ac_confirmed"] = True
+            state["user_input"] = "[INIT]"
+            return state
 
-        # Phase 4: Final Story Generation
-        if not state.final_story:
+        prompt = self.templates["update_ac"].format(ac_json=state["ac_list"], feedback=state["user_input"])
+        ac_updated: AcceptanceCriteria = await self.llm.query(self.personas["agile_coach"], prompt, AcceptanceCriteria)
+        state["ac_list"] = ac_updated.criteria
+        state["phase3_retries"] += 1
+        state["sys_message"] = f"AC Updated (Attempt {state['phase3_retries']}/3). Type 'confirm' or write feedback:\n" + "\n".join(state["ac_list"])
+        return state
+
+    async def _node_story_synthesis(self, state: GraphState) -> GraphState:
+        if state["phase4_retries"] >= 3:
+            state["_story_confirmed"] = True
+            state["is_complete"] = True
+            state["sys_message"] = "Story limit reached. Pipeline complete."
+            return state
+
+        if not state["final_story"]:
             prompt = self.templates["generate_story"].format(
-                who=state.who, what=state.what, why=state.why, agreed_ac=state.ac_list
+                who=state["who"], what=state["what"], why=state["why"], agreed_ac=state["ac_list"]
             )
             story: FinalStory = await self.llm.query(self.personas["story_writer"], prompt, FinalStory)
-            state.final_story = story.user_story
-            return f"Draft Story:\n{state.final_story}\n\nType 'confirm' to finalize or write feedback.", state
+            state["final_story"] = story.user_story
+            state["sys_message"] = f"Draft Story:\n{state['final_story']}\n\nType 'confirm' to finalize or write feedback."
+            return state
 
-        if not getattr(state, "story_confirmed", False):
-            if user_input.strip().lower() == "confirm":
-                state.story_confirmed = True
-                return "Process Complete.", state
-                
-            prompt = self.templates["update_story"].format(story_json=state.final_story, feedback=user_input)
-            story_updated: FinalStory = await self.llm.query(self.personas["story_writer"], prompt, FinalStory)
-            state.final_story = story_updated.user_story
-            state.ac_list = story_updated.acceptance_criteria
-            return f"Story Updated:\n{state.final_story}\n\nType 'confirm' to finalize.", state
+        if state["user_input"].strip().lower() == "confirm":
+            state["_story_confirmed"] = True
+            state["is_complete"] = True
+            state["sys_message"] = "Pipeline Execution Completed Successfully."
+            return state
 
-        return "Pipeline execution finished.", state
+        prompt = self.templates["update_story"].format(story_json=state["final_story"], feedback=state["user_input"])
+        story_updated: FinalStory = await self.llm.query(self.personas["story_writer"], prompt, FinalStory)
+        state["final_story"] = story_updated.user_story
+        state["ac_list"] = story_updated.acceptance_criteria
+        state["phase4_retries"] += 1
+        state["sys_message"] = f"Story Updated (Attempt {state['phase4_retries']}/3):\n{state['final_story']}\n\nType 'confirm' to finalize."
+        return state
