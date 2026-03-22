@@ -1,5 +1,6 @@
 import yaml
-from pathlib import Path
+import asyncio
+from typing import Tuple
 from models import (
     SessionState, RawTextExtraction, ValidationResult, 
     MissingTechnicalDetail, AcceptanceCriteria, FinalStory
@@ -7,152 +8,130 @@ from models import (
 from llm_client import StructuredLLMClient
 
 class JiraStatelessPipeline:
-    def __init__(self, llm_client: StructuredLLMClient, prompt_file: str = "prompts.yaml"):
+    def __init__(self, llm_client: StructuredLLMClient):
         self.llm = llm_client
-        self.prompts = self._load_prompts(prompt_file)
-
-    def _load_prompts(self, filepath: str) -> dict:
-        path = Path(filepath)
-        with open(path, "r", encoding="utf-8") as file:
-            return yaml.safe_load(file)
-
-    def run(self, raw_text: str) -> SessionState:
-        print("--- Enterprise Raw-Text Jira Pipeline ---")
         
-        # Phase 0: Zero-Shot Extraction
-        state = self._extract_initial_state(raw_text)
-
-        # Phase 1: JIT Validation
-        state = self._resolve_core_triad(state)
-
-        # Phase 2: Always-Dynamic Grooming
-        state = self._gather_technical_context(state)
-
-        # Phase 3: AC Synthesis
-        state = self._synthesize_ac(state)
-
-        # Phase 4: Final Artifact Generation
-        state = self._generate_final_story(state)
-
-        return state
-
-    def _extract_initial_state(self, raw_text: str) -> SessionState:
-        print("\n[SYSTEM] Analyzing raw input...")
-        sys_prompt = self.prompts['system_personas']['extractor']
-        user_prompt = self.prompts['user_prompts']['extract_raw_text'].format(raw_text=raw_text)
-        
-        extraction = self.llm.query(sys_prompt, user_prompt, RawTextExtraction)
-        
-        return SessionState(
-            what=extraction.what.evidence if extraction.what.identified else None,
-            why=extraction.why.evidence if extraction.why.identified else None,
-            who=extraction.who.evidence if extraction.who.identified else None,
-            ac_evidence=extraction.ac_evidence
-        )
-
-    def _resolve_core_triad(self, state: SessionState) -> SessionState:
-        sys_prompt = self.prompts['system_personas']['validator']
-        max_retries = 3
-
-        for field in ['what', 'why', 'who']:
-            retries = 0
-            while getattr(state, field) is None:
-                if retries >= max_retries:
-                    print(f"\n[SYSTEM WARN] Threshold exceeded. Forcing raw input for {field.upper()}.")
-                    setattr(state, field, f"Unknown {field}")
-                    break
-
-                user_ans = input(f"\nMissing {field.upper()}. Please clarify:\n> ").strip()
-                if not user_ans:
-                    continue
-
-                user_prompt = self.prompts['user_prompts']['validate_missing'].format(
-                    field_name=field.upper(), user_ans=user_ans
-                )
-
-                validation = self.llm.query(sys_prompt, user_prompt, ValidationResult)
-
-                if validation.is_valid:
-                    setattr(state, field, validation.normalized_value)
-                else:
-                    retries += 1
-                    reason = validation.rejection_reason or "Invalid input."
-                    print(f"\n[REJECTED] {reason} (Attempt {retries}/{max_retries})")
-
-        return state
-
-    def _gather_technical_context(self, state: SessionState) -> SessionState:
-        print("\n[SYSTEM] Generating dynamic grooming questions...")
-        sys_prompt = self.prompts['system_personas']['tech_lead']
-        user_prompt = self.prompts['user_prompts']['generate_dynamic_questions'].format(what_statement=state.what)
-        
-        analysis = self.llm.query(sys_prompt, user_prompt, MissingTechnicalDetail)
-        
-        if analysis.has_missing_details and analysis.questions:
-            questions = analysis.questions[:4]
-            for i, q in enumerate(questions, 1):
-                ans = input(f"\nTech Detail {i}/{len(questions)}:\n{q}\n(Answer, or type 'skip'):\n> ").strip()
-                if ans.lower() not in ["skip", "no", "n/a", ""]:
-                    state.tech_notes.append(f"Q: {q} | A: {ans}")
-        else:
-            print("[SYSTEM] No technical questions needed.")
+        # In enterprise apps, inject this dependency instead of reading files in __init__
+        with open("prompts.yaml", "r") as f:
+            self.prompts = yaml.safe_load(f)
             
-        return state
+        self.personas = self.prompts["system_personas"]
+        self.templates = self.prompts["user_prompts"]
 
-    def _synthesize_ac(self, state: SessionState) -> SessionState:
-        print("\n[SYSTEM] Synthesizing Acceptance Criteria...")
-        sys_prompt = self.prompts['system_personas']['agile_coach']
-        user_prompt = self.prompts['user_prompts']['generate_ac'].format(
-            who=state.who, what=state.what, why=state.why, tech_notes=state.tech_notes,
-            ac_evidence=state.ac_evidence or "None"
-        )
-        
-        ac_draft = self.llm.query(sys_prompt, user_prompt, AcceptanceCriteria)
-        current_ac = ac_draft.criteria
-        
-        for attempt in range(3):
-            print("\n--- Proposed AC ---")
-            for idx, crit in enumerate(current_ac, 1):
-                print(f"{idx}. {crit}")
-                
-            feedback = input(f"\nConfirm AC? (Type 'confirm' or edits. Edits left: {3 - attempt}):\n> ").strip()
-            if feedback.lower() == 'confirm':
+    def run(self, raw_input: str) -> SessionState:
+        """
+        Synchronous wrapper. Bootstraps the asyncio event loop for CLI execution.
+        """
+        return asyncio.run(self._orchestrate_cli_loop(raw_input))
+
+    async def _orchestrate_cli_loop(self, initial_input: str) -> SessionState:
+        """
+        Manages the interactive terminal loop and state persistence across turns.
+        """
+        state = SessionState()
+        user_input = initial_input
+
+        while True:
+            reply, state = await self._execute_turn(user_input, state)
+            print(f"\n[AGENT] {reply}")
+            
+            # Termination condition
+            if getattr(state, "story_confirmed", False):
                 break
                 
-            update_prompt = self.prompts['user_prompts']['update_ac'].format(
-                ac_json={"criteria": current_ac}, feedback=feedback
-            )
-            current_ac = self.llm.query(sys_prompt, update_prompt, AcceptanceCriteria).criteria
+            # Await terminal I/O (Blocking)
+            user_input = input("\n[USER] > ").strip()
+            if not user_input:
+                user_input = "[INIT]"
 
-        state.ac_list = current_ac
         return state
 
-    def _generate_final_story(self, state: SessionState) -> SessionState:
-        print("\n[SYSTEM] Generating final artifact...")
-        sys_prompt = self.prompts['system_personas']['story_writer']
-        user_prompt = self.prompts['user_prompts']['generate_story'].format(
-            who=state.who, what=state.what, why=state.why, agreed_ac=state.ac_list
-        )
-        
-        story_draft = self.llm.query(sys_prompt, user_prompt, FinalStory)
-        current_story = story_draft
-        
-        for attempt in range(3):
-            print("\n" + "="*50 + "\nFINAL AGILE JIRA STORY\n" + "="*50)
-            print(current_story.user_story)
-            print("\nAC:")
-            for idx, crit in enumerate(current_story.acceptance_criteria, 1):
-                print(f"{idx}. {crit}")
-                
-            feedback = input(f"\nConfirm Story? (Type 'confirm' or edits. Edits left: {3 - attempt}):\n> ").strip()
-            if feedback.lower() == 'confirm':
-                break
-                
-            update_prompt = self.prompts['user_prompts']['update_story'].format(
-                story_json=current_story.model_dump_json(), feedback=feedback
-            )
-            current_story = self.llm.query(sys_prompt, update_prompt, FinalStory)
+    async def _execute_turn(self, user_input: str, state: SessionState) -> Tuple[str, SessionState]:
+        """
+        Pure state machine transition logic. No UI blocking here.
+        """
+        # Phase 0: Extraction
+        if not state.what and not state.who and not state.why:
+            prompt = self.templates["extract_raw_text"].format(raw_text=user_input)
+            ext: RawTextExtraction = await self.llm.query(self.personas["extractor"], prompt, RawTextExtraction)
+            
+            state.what = ext.what.evidence if ext.what.identified else None
+            state.who = ext.who.evidence if ext.who.identified else None
+            state.why = ext.why.evidence if ext.why.identified else None
+            state.ac_evidence = ext.ac_evidence
+            
+            return await self._execute_turn("[INIT]", state)
 
-        state.final_story = current_story.user_story
-        state.ac_list = current_story.acceptance_criteria
-        return state
+        # Phase 1: Validation
+        missing = [f for f in ["what", "why", "who"] if getattr(state, f) is None]
+        if missing:
+            field = missing[0]
+            if user_input == "[INIT]":
+                return f"Missing field '{field.upper()}'. Please define it.", state
+                
+            prompt = self.templates["validate_missing"].format(field_name=field, user_ans=user_input)
+            val: ValidationResult = await self.llm.query(self.personas["validator"], prompt, ValidationResult)
+            
+            if val.is_valid:
+                setattr(state, field, val.normalized_value)
+                return await self._execute_turn("[INIT]", state)
+            return f"Rejected: {val.rejection_reason}. Try again.", state
+
+        # Phase 2: Technical Grooming
+        if getattr(state, "pending_questions", None) is None:
+            prompt = self.templates["generate_dynamic_questions"].format(what_statement=state.what)
+            tech: MissingTechnicalDetail = await self.llm.query(self.personas["tech_lead"], prompt, MissingTechnicalDetail)
+            state.pending_questions = tech.questions
+            return await self._execute_turn("[INIT]", state)
+
+        if state.pending_questions:
+            if user_input != "[INIT]":
+                if user_input.strip().lower() != "skip":
+                    state.tech_notes.append(f"Q: {state.pending_questions[0]} | A: {user_input}")
+                state.pending_questions.pop(0)
+                
+            if state.pending_questions:
+                return f"Tech Question: {state.pending_questions[0]}", state
+            return await self._execute_turn("[INIT]", state)
+
+        # Phase 3: Acceptance Criteria Synthesis
+        if not state.ac_list:
+            prompt = self.templates["generate_ac"].format(
+                who=state.who, what=state.what, why=state.why,
+                tech_notes="\n".join(state.tech_notes), ac_evidence=state.ac_evidence or "None"
+            )
+            ac: AcceptanceCriteria = await self.llm.query(self.personas["agile_coach"], prompt, AcceptanceCriteria)
+            state.ac_list = ac.criteria
+            return "Draft AC generated. Type 'confirm' to proceed or write feedback:\n" + "\n".join(state.ac_list), state
+
+        if not getattr(state, "ac_confirmed", False):
+            if user_input.strip().lower() == "confirm":
+                state.ac_confirmed = True
+                return await self._execute_turn("[INIT]", state)
+                
+            prompt = self.templates["update_ac"].format(ac_json=state.ac_list, feedback=user_input)
+            ac_updated: AcceptanceCriteria = await self.llm.query(self.personas["agile_coach"], prompt, AcceptanceCriteria)
+            state.ac_list = ac_updated.criteria
+            return "AC Updated. Type 'confirm' to proceed or write feedback:\n" + "\n".join(state.ac_list), state
+
+        # Phase 4: Final Story Generation
+        if not state.final_story:
+            prompt = self.templates["generate_story"].format(
+                who=state.who, what=state.what, why=state.why, agreed_ac=state.ac_list
+            )
+            story: FinalStory = await self.llm.query(self.personas["story_writer"], prompt, FinalStory)
+            state.final_story = story.user_story
+            return f"Draft Story:\n{state.final_story}\n\nType 'confirm' to finalize or write feedback.", state
+
+        if not getattr(state, "story_confirmed", False):
+            if user_input.strip().lower() == "confirm":
+                state.story_confirmed = True
+                return "Process Complete.", state
+                
+            prompt = self.templates["update_story"].format(story_json=state.final_story, feedback=user_input)
+            story_updated: FinalStory = await self.llm.query(self.personas["story_writer"], prompt, FinalStory)
+            state.final_story = story_updated.user_story
+            state.ac_list = story_updated.acceptance_criteria
+            return f"Story Updated:\n{state.final_story}\n\nType 'confirm' to finalize.", state
+
+        return "Pipeline execution finished.", state
