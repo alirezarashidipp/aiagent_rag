@@ -3,7 +3,7 @@ import ssl
 import json
 import httpx
 import truststore
-from openai import AsyncOpenAI, APIStatusError
+import openai
 from pydantic import BaseModel, ValidationError
 from typing import Type, TypeVar
 from token_jwt import get_token
@@ -18,20 +18,19 @@ class StructuredLLMClient:
         
         ctx = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         
-        self.httpx_client = httpx.AsyncClient(
+        self.httpx_client = httpx.Client(
             http2=True,
             verify=ctx,
             timeout=60.0
         )
         
-        self.client = AsyncOpenAI(
+        self.client = openai.OpenAI(
             api_key="proxy-dummy-key",
             http_client=self.httpx_client,
             base_url=self.base_url
         )
 
-    async def query(self, system_prompt: str, user_prompt: str, response_model: Type[T]) -> T:
-        # Note: If get_token() performs network I/O, it must also be refactored to async.
+    def query(self, system_prompt: str, user_prompt: str, response_model: Type[T]) -> T:
         current_jwt = get_token()
         
         per_request_headers = {
@@ -41,6 +40,7 @@ class StructuredLLMClient:
             "x-usersession-id": str(uuid.uuid4())
         }
 
+        # Inject Pydantic schema dynamically to guarantee output structure via standard JSON mode
         schema_instruction = (
             f"\n\nYou MUST return a valid JSON object that adheres exactly to the following JSON schema:\n"
             f"{json.dumps(response_model.model_json_schema())}"
@@ -49,7 +49,7 @@ class StructuredLLMClient:
         system_content = system_prompt + schema_instruction
 
         try:
-            response = await self.client.chat.completions.create(
+            response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[
                     {"role": "system", "content": system_content},
@@ -59,15 +59,16 @@ class StructuredLLMClient:
                 extra_headers=per_request_headers,
                 response_format={"type": "json_object"},
                 max_tokens=1500,
-                temperature=0.0
+                temperature=0.0 # Deterministic output for requirements engineering
             )
             
             raw_content = response.choices[0].message.content
             return response_model.model_validate_json(raw_content)
             
-        except APIStatusError as e:
+        except openai.APIStatusError as e:
             print(f"[FATAL] API Error: {e.status_code} - {e.response.text}")
             raise
         except ValidationError as e:
             print(f"[FATAL] LLM Output Validation Failed: {e}")
+            print(f"Raw Output: {raw_content}")
             raise
