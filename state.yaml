@@ -34,6 +34,7 @@ class WorkflowState(TypedDict):
     missing_fields: List[str]
     current_field_target: Optional[str]
     phase1_retries: int
+    last_rejection_reason: Optional[str] # Added for rejection tracing
     is_aborted: bool
     abort_reason: Optional[str]
     
