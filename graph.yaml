@@ -56,8 +56,15 @@ def phase1_lock(state: WorkflowState) -> dict:
     if retries >= 3:
         return {"is_aborted": True, "abort_reason": f"Hard Abort: Failed 3 times on '{target}'."}
         
-    # Pause graph and wait for human input
-    user_val = interrupt(f"Missing '{target}'. Please provide a value:")
+    # Construct interrupt payload using previous rejection reason if it exists
+    rejection = state.get("last_rejection_reason")
+    if rejection:
+        prompt_msg = f"[REJECTED]: {rejection}\nMissing '{target}'. Please provide a valid value:"
+    else:
+        prompt_msg = f"Missing '{target}'. Please provide a value:"
+        
+    # Pause execution and request input from the human operator
+    user_val = interrupt(prompt_msg)
     
     sys_prompt = PROMPTS["validator"]["system"].format(field=target)
     result = llm.query(sys_prompt, f"User provided: {user_val}", ValidatorOutput)
@@ -67,10 +74,14 @@ def phase1_lock(state: WorkflowState) -> dict:
         return {
             target: result.normalized_value,
             "missing_fields": new_missing,
-            "phase1_retries": 0 # Reset counter on success
+            "phase1_retries": 0,
+            "last_rejection_reason": None # Clear error state on success
         }
     else:
-        return {"phase1_retries": retries + 1}
+        return {
+            "phase1_retries": retries + 1,
+            "last_rejection_reason": result.rejection_reason # Save reason for the next loop
+        }
 
 def phase2_tech_lead(state: WorkflowState) -> dict:
     sys_prompt = PROMPTS["tech_lead"]["system"].format(what=state["what"], why=state["why"])
