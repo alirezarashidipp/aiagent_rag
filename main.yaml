@@ -1,0 +1,71 @@
+# main.py
+import uuid
+from langgraph.types import Command
+from graph import graph
+
+def run_pipeline():
+    thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}}
+    
+    print("=== Jira Story Generator Pipeline (MVP) ===")
+    raw_text = input("Enter raw unstructured requirement: ")
+    
+    if not raw_text.strip():
+        print("[FATAL] Input cannot be empty. Aborting.")
+        return
+
+    # Seed the initial state
+    initial_state = {
+        "raw_input": raw_text,
+        "missing_fields": [],
+        "phase1_retries": 0,
+        "is_aborted": False,
+        "pending_questions": [],
+        "tech_notes": [],
+        "feedback_retries": 0,
+        "is_complete": False
+    }
+
+    current_input = initial_state
+
+    while True:
+        try:
+            # Stream events until completion or interrupt
+            for event in graph.stream(current_input, config=config):
+                for node_name, state_update in event.items():
+                    print(f"[Trace] Node executed -> {node_name}")
+                    
+                    if state_update.get("is_aborted"):
+                        print(f"\n[ABORTED] {state_update.get('abort_reason')}")
+                        return
+                        
+                    if state_update.get("is_complete"):
+                        print("\n=== FINAL AGILE STORY ===")
+                        print(state_update.get("final_story", "No story generated."))
+                        print("=========================")
+                        return
+
+            # Check snapshot for pending interrupts
+            state_snapshot = graph.get_state(config)
+            if state_snapshot.next:
+                # Graph is blocked, waiting for human input
+                interrupt_val = state_snapshot.tasks[0].interrupts[0].value
+                print(f"\n[Action Required] {interrupt_val}")
+                
+                user_response = input("> ")
+                if user_response.strip().lower() == "exit":
+                    print("[Process Terminated]")
+                    break
+                
+                # Resume execution with the human feedback
+                current_input = Command(resume=user_response)
+            else:
+                # No more nodes to run
+                break
+                
+        except Exception as e:
+            print(f"[FATAL ERROR] Pipeline crashed: {e}")
+            break
+
+if __name__ == "__main__":
+    run_pipeline()
