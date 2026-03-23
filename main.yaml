@@ -44,6 +44,11 @@ def run_pipeline():
                 for node_name, state_update in event.items():
                     print(f"[Trace] Node executed -> {node_name}")
                     
+                    # Guardrail: LangGraph v0.2+ yields a tuple for '__interrupt__' events. 
+                    # We must skip non-dictionary payloads to prevent attribute errors.
+                    if not isinstance(state_update, dict):
+                        continue
+                    
                     if state_update.get("is_aborted"):
                         print(f"\n[ABORTED] {state_update.get('abort_reason')}")
                         return
